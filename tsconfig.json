@@ -1,0 +1,10 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "es2022",
+		"moduleResolution": "bundler",
+		"strict": true
+	},
+	"include": ["**/*"],
+	"exclude": ["node_modules", "dist"]
+}
