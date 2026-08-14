@@ -1,34 +1,39 @@
-import { sha256 } from '@ka-libs/crypto';
+
 import fs from 'fs';
 import fsp from 'fs/promises';
-import os from 'os';
-import path from 'path';
 import { pipeline } from 'stream/promises';
+
+import path from 'path';
 import { mkdirp } from 'mkdirp';
 import { path7za } from '7zip-bin';
-import { spawnSync } from 'child_process';
-import cliProgress from 'cli-progress';
 import { Transform } from 'stream';
-import { BuildC } from '../core/buildc';
+import cliProgress from 'cli-progress';
+import { runFile } from '@ka-libs/utils';
 
-const ExcludeFiles = new Set();
+import { BuildC } from '../core/buildc';
+import { createHash } from 'crypto';
+import { extractArchive } from './extractArchive';
+
+const MAX_RETRIES = 5;
+
 function getZigUrl(): string {
 	const {
 		platform,
 		DEPS: { zigCC },
 	} = BuildC;
 
-	let target = '';
-	if (platform === 'win32') {
-		target = 'x86_64-windows';
-	} else if (platform === 'linux') {
-		target = 'x86_64-linux';
-	} else {
-		throw new Error(`Unsupported platform: ${platform}`);
+	switch (platform) {
+		case 'win32':
+			return `https://ziglang.org/download/${zigCC.version}/zig-x86_64-windows-${zigCC.version}.zip`;
+		case 'linux':
+			// Zig 0.12+ Linux 使用 tar.xz
+			return `https://ziglang.org/download/${zigCC.version}/zig-x86_64-linux-${zigCC.version}.tar.xz`;
+		default:
+			throw new Error(`Unsupported platform: ${platform}`);
 	}
-
-	return `https://ziglang.org/download/${zigCC.version}/zig-${target}-${zigCC.version}.zip`;
 }
+
+
 
 function getDepHash(name: 'zigCC') {
 	const { platform, DEPS } = BuildC;
@@ -43,9 +48,16 @@ function getDepHash(name: 'zigCC') {
 	}
 }
 async function notValidateHash(filePath: string, expected: string): Promise<boolean> {
-	const content = await fsp.readFile(filePath);
-	const currentHash = await sha256(content);
-	console.log(`\n\nFilePath: ${filePath}\nValidHash:\t${currentHash}\nExpected:\t${expected}`);
+	// ✅ 流式计算 SHA256，内存占用恒定 ~64KB
+	const hash = createHash('sha256');
+	const stream = fs.createReadStream(filePath);
+
+	for await (const chunk of stream) {
+		hash.update(chunk);
+	}
+
+	const currentHash = hash.digest('hex');
+	console.log(`\nFilePath: ${filePath}\nValidHash:\t${currentHash}\nExpected:\t${expected}`);
 	return currentHash !== expected;
 }
 
@@ -72,7 +84,7 @@ async function handleDownload(name: 'zigCC', url: string) {
 	});
 
 	// 将字节转为 MB 显示，避免数字过长
-	const toMB = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
+	const toMB = (bytes: number) => Math.round((bytes / 1024 / 1024) * 10) / 10;
 
 	bar.start(totalBytes ? Number(toMB(totalBytes)) : 0, 0);
 
@@ -108,7 +120,7 @@ export async function downloadDep(name: 'zigCC', url: string) {
 
 	let tmpFile = '';
 	for (const file of fs.readdirSync(cacheDir)) {
-		if (file.endsWith('.tmp') && file.startsWith(name)) {
+		if (file.endsWith('.tmp') && file.startsWith(`${name}-`)) {
 			tmpFile = path.join(cacheDir, file);
 			break;
 		}
@@ -126,55 +138,56 @@ export async function downloadDep(name: 'zigCC', url: string) {
 	// 解压（使用系统自带工具，无需额外依赖）
 	const unpackDir = path.resolve(DEPS.location, DEPS[name].location, platform);
 
-	await mkdirp(unpackDir);
-
-	const result = spawnSync(path7za, ['x', tmpFile, `-o${unpackDir}`, '-y', '-bso0', '-bsp0'], {
-		stdio: 'inherit',
-	});
-
-	if (result.status !== 0) {
-		throw new Error(`7za exited with code ${result.status}`);
-	}
+	// 异步解压，按平台自动选择工具
+	await extractArchive(tmpFile, unpackDir);
 }
 
-export async function getEXE(name: 'zigCC', retry?: number) {
+export async function getEXE(name: 'zigCC', retry: number = MAX_RETRIES): Promise<string> {
 	const { platform, DEPS } = BuildC;
 
-	let url = '';
-	switch (name) {
-		case 'zigCC':
-			url = getZigUrl();
-			break;
-		default:
-			throw new Error(`Unknown dependency: ${name}`);
-	}
-	const unpackDir = path.resolve(DEPS.location, DEPS[name].location, platform);
-	const baseDir = path.basename(url, '.zip');
+	const url =
+		name === 'zigCC'
+			? getZigUrl()
+			: (() => {
+					throw new Error(`Unknown dependency: ${name}`);
+				})();
 
+	const unpackDir = path.resolve(DEPS.location, DEPS[name].location, platform);
+	// ✅ 兼容 .zip 和 .tar.xz 两种后缀
+	const baseDir = path.basename(url).replace(/\.(zip|tar\.xz|tar\.gz)$/, '');
 	const exeDir = path.resolve(unpackDir, baseDir);
 
-	if (typeof retry === 'number' || !fs.existsSync(exeDir)) {
-		console.log(`📦 ${Number(retry) > 0 ? 'Retry ' : ''}Downloading ${url} ...`);
+	if (!fs.existsSync(exeDir)) {
+		if (retry <= 0) throw new Error(`Failed to download ${name} after ${MAX_RETRIES} retries`);
+		console.log(`📦 ${retry < MAX_RETRIES ? `Retry (${MAX_RETRIES - retry + 1}/${MAX_RETRIES}) ` : ''}Downloading ${url} ...`);
 		try {
 			await downloadDep(name, url);
 		} catch (error) {
-			console.error(`Download failed: ${error}`);
-
-			return await getEXE(name, 5);
+			console.error(`Download failed: ${(error as Error).message}`);
+			// ✅ 明确的递减退出条件
+			return await getEXE(name, retry - 1);
 		}
 	}
 
+	// ✅ 跨平台查找可执行文件
 	const files = fs.readdirSync(exeDir);
+	const exeFile = files.find((f) => (platform === 'win32' ? f.endsWith('.exe') : f === 'zig' || f === 'zigcc'));
 
-	for (const file of files) {
-		if (file.endsWith('.exe')) {
-			return path.resolve(exeDir, file);
+	if (exeFile) {
+		const fullPath = path.resolve(exeDir, exeFile);
+		// ✅ Linux 下确保有执行权限
+		if (platform !== 'win32') {
+			await fsp.chmod(fullPath, 0o755);
 		}
+		return fullPath;
 	}
 
-	if (typeof retry === 'undefined' || retry > 1) {
-		return await getEXE(name, (retry ?? 5) - 1);
+	// 目录存在但没找到可执行文件，可能是解压不完整
+	if (retry > 0) {
+		console.warn(`⚠️  Executable not found in ${exeDir}, re-downloading...`);
+		await fsp.rm(exeDir, { recursive: true, force: true });
+		return await getEXE(name, retry - 1);
 	}
 
-	throw new Error(`No executable found in ${unpackDir}`);
+	throw new Error(`No executable found in ${exeDir} after ${MAX_RETRIES} retries`);
 }

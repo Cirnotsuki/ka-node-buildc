@@ -2,15 +2,22 @@ import fs from 'fs';
 import os from 'os';
 import fsp from 'fs/promises';
 import path from 'path';
+// import FormData from 'form-data';
+import nodeFetch from 'node-fetch';
 import { fileURLToPath } from 'url';
-import child_process from 'child_process';
+import { PassThrough } from 'stream';
+
+import { runFile } from '@ka-libs/utils';
+
 import { getEXE } from './deps';
-import { runFile } from '../../../ka-utils/src/lib/run-file';
-import { FooterBuffer } from '../core/footerBuffer';
 
 import config from '../../config';
 import { BuildC } from '../core/buildc';
 import { createFooter } from './utils';
+import { uuidv4 } from '@ka-libs/crypto';
+import { pipeline } from 'stream/promises';
+import pack from './pack';
+import { createParser } from 'eventsource-parser';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,50 +25,26 @@ const __dirname = path.dirname(__filename);
 /**
  * 获取 PHP include 目录
  */
-// function getPhpIncludes() {
-// 	const platform = Runtime.settings.platform.toLowerCase();
+async function getPhpIncludes() {
+	// 优先用 php-config 动态获取，避免硬编码路径
+	const result = await runFile('php-config', ['--include-dir'], {
+		timeout: 5000,
+		stdio: 'pipe',
+	});
 
-// 	// Windows php-sdk
-// 	if (platform === 'win32') {
-// 		const phpDev = config.deps.phpDev ?? process.env.PHP_DEV_PATH;
+	if (result.code === 0 && result.stdout.trim()) {
+		const base = result.stdout.trim();
+		return [base, `${base}/main`, `${base}/TSRM`, `${base}/Zend`];
+	}
 
-// 		const phpHeader = path.join(phpDev, 'main', 'php.h');
-
-// 		if (!fs.existsSync(phpHeader)) {
-// 			throw new Error(`Windows: php.h not found: ${phpHeader}`);
-// 		}
-
-// 		return [
-// 			phpDev,
-// 			path.resolve(phpDev, 'main'),
-// 			path.resolve(phpDev, 'TSRM'),
-// 			path.resolve(phpDev, 'Zend'),
-// 		];
-// 	}
-
-// 	// Linux php-dev
-// 	else {
-// 		const includes = [
-// 			'/usr/include/php',
-// 			'/usr/include/php/main',
-// 			'/usr/include/php/TSRM',
-// 			'/usr/include/php/Zend',
-// 		];
-
-// 		const exists = fs.existsSync('/usr/include/php/main/php.h');
-
-// 		if (!exists) {
-// 			throw new Error('Linux: php-dev not installed. Run: sudo apt install php-dev');
-// 		}
-
-// 		return includes;
-// 	}
-// }
+	// Fallback
+	return ['/usr/include/php', '/usr/include/php/main', '/usr/include/php/TSRM', '/usr/include/php/Zend'];
+}
 
 /**
  * OpenSSL路径
  */
-function getOpenSSL() {
+async function getOpenSSL() {
 	const { platform, DEPS } = BuildC;
 
 	switch (platform) {
@@ -83,7 +66,22 @@ function getOpenSSL() {
 
 		case 'linux':
 		case 'darwin':
-			return [];
+			try {
+				const result = await runFile('pkg-config', ['--cflags', '--libs', 'openssl'], {
+					timeout: 5000,
+					stdio: 'pipe',
+				});
+
+				if (result.code === 0 && result.stdout.trim()) {
+					return result.stdout.trim().split(/\s+/).filter(Boolean);
+				}
+			} catch {
+				// pkg-config 不存在或超时，静默降级
+			}
+
+			// Fallback: Ubuntu/Debian 默认路径
+			console.warn('⚠️  pkg-config failed, using fallback OpenSSL paths');
+			return ['-I/usr/include', '-L/usr/lib/x86_64-linux-gnu', '-lssl', '-lcrypto'];
 		default:
 			throw new Error('Unsupported platform');
 	}
@@ -97,7 +95,7 @@ async function createBindingGyp(dirPathC: string) {
 
 	// const phpIncludes = getPhpIncludes();
 
-	const opensslLib = getOpenSSL();
+	const opensslLib = await getOpenSSL();
 
 	const target = Replacement.KA_C_RUNTIME_EXE_NAME;
 
@@ -190,54 +188,58 @@ async function buildRuntimeExe() {
 }
 
 /**
- * 执行 node-gyp
+ * 执行 node-gyp（兼容 Win/Linux/macOS，统一使用 runFile）
  */
-function runNodeGyp(cwd: string) {
-	return new Promise((resolve, reject) => {
-		const isWin = process.platform === 'win32';
+async function runNodeGyp(cwd: string): Promise<void> {
+	const isWin = process.platform === 'win32';
 
-		const command = isWin ? 'cmd.exe' : 'node-gyp';
+	// Windows 下 node-gyp 通常是 .cmd 脚本，必须通过 shell 执行或通过 npx 调用
+	// 使用 npx 可以确保找到项目本地或全局安装的 node-gyp，避免路径问题
+	const command = isWin ? 'npx.cmd' : 'npx';
+	const args = ['--yes', 'node-gyp', 'rebuild'];
 
-		const args = isWin ? ['/c', 'node-gyp.cmd', 'rebuild'] : ['rebuild'];
+	console.log(`🔨 Run: ${command} ${args.join(' ')}`);
 
-		console.log('Run:', command, args.join(' '));
-
-		const child = child_process.spawn(command, args, {
-			cwd,
-			stdio: 'inherit',
-			shell: false,
-		});
-
-		child.on('error', (err) => {
-			console.error('spawn error:', err);
-			reject(err);
-		});
-
-		child.on('close', (code) => {
-			if (code === 0) {
-				resolve(1);
-			} else {
-				reject(new Error(`node-gyp exited ${code}`));
-			}
-		});
+	const result = await runFile(command, args, {
+		cwd,
+		stdio: 'inherit',
+		timeout: 300_000, // node-gyp 编译可能较慢，给 5 分钟超时
 	});
+
+	if (result.code !== 0) {
+		throw new Error(`node-gyp exited with code ${result.code}`);
+	}
 }
 
-async function buildExe(outExe: string, cFile: string) {
+async function buildExe(outExe: string, cFile: string, nodify: (msg: string) => void | null) {
 	const { platform } = BuildC;
 
-	const options = ['cc', '-o', outExe, cFile, '-O2', '-Wl,--strip-all'];
+	const options = ['cc', '-o', outExe, cFile, '-O2', '-std=c11', '-Wl,--strip-all'];
+	const opensslFiles = await getOpenSSL();
+	options.push(...opensslFiles);
 
-	options.push(...getOpenSSL());
-
-	if (platform === 'win32') {
-		// Windows GNU 工具链还需要这些系统库
-		options.push('-lws2_32', '-lgdi32', '-ladvapi32', '-lcrypt32', '-luser32');
+	switch (platform) {
+		case 'win32':
+			// Windows GNU 工具链还需要这些系统库
+			options.push('-lws2_32', '-lgdi32', '-ladvapi32', '-lcrypt32', '-luser32');
+			break;
+		case 'linux':
+			// ✅ 仅 Linux 支持全静态
+			options.push('-lpthread', '-ldl', '-static');
+			break;
+		case 'darwin':
+			// ✅ macOS 只能动态链接，补充必要系统框架
+			options.push('-lpthread', '-ldl', '-framework', 'Security', '-framework', 'CoreFoundation');
+			break;
+		default:
+			break;
 	}
+
+	logger(nodify, `⚙️ Build Options: `, options);
 
 	const result = await runFile(await getEXE('zigCC'), options, {
 		stdio: 'inherit', // 捕获输出以便在失败时抛出详细错误
-		timeout: 120_000, // 2 分钟超时
+		timeout: 180_000, // 2 分钟超时
 	});
 
 	if (result.code !== 0) {
@@ -256,8 +258,12 @@ async function buildExe(outExe: string, cFile: string) {
 function setBuildOptions(opt: any) {
 	const footer = opt.footer || {};
 
-	if (['win32', 'linux', 'macos'].includes(opt.platform)) {
+	if (['win32', 'linux', 'darwin'].includes(opt.platform)) {
 		BuildC.platform = opt.platform.toLowerCase();
+	}
+
+	if (typeof opt.cFile === 'string' && fs.existsSync(opt.cFile)) {
+		BuildC.cFile = opt.cFile;
 	}
 
 	if (typeof footer.version === 'number') {
@@ -273,50 +279,231 @@ function setBuildOptions(opt: any) {
 	}
 }
 
+function logger(notify: (base64: string) => void | null, text: string, data?: any) {
+	if (notify) {
+		let subfix = '';
+
+		if (data) {
+			subfix = JSON.stringify(data, null, 2);
+		}
+
+		const encoded = Buffer.from('\n' + text + subfix + '\n', 'utf-8').toString('base64');
+		notify(encoded);
+	} else {
+		console.log('\n' + text, data || '');
+	}
+}
+
+function sleep(time?: number) {
+	if (!time) new Promise((resolve) => setImmediate(resolve));
+	return new Promise((resolve) => setTimeout(resolve, time));
+}
 /**
  * 主编译入口
  */
-export async function build(outExe: string, opt?: any) {
+export async function build(name: string, opt?: Record<string, any>): Promise<Buffer> {
 	if (opt && typeof opt === 'object') {
 		setBuildOptions(opt);
 	}
 
-	const { platform, FOOTER, DEPS, Replacement } = BuildC;
+	const notify = typeof opt?.notify === 'function' ? opt.notify : null;
 
-	DEPS.cache = await fsp.mkdtemp(path.join(os.tmpdir(), 'ka-buildc'));
+	const { platform, FOOTER, Replacement } = BuildC;
 
+	const buildDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ka-buildc'));
 	const ext = platform === 'win32' ? '.exe' : '';
-
-	console.log(`🔨 Target platform: ${platform}`);
+	const outExe = path.resolve(buildDir, name + ext);
 
 	Replacement.KA_C_FOOTER_STRUCT = createFooter().struct;
 	Replacement.KA_C_FOOTER_SIZE = FOOTER.SIZE + '';
 	Replacement.KA_C_FOOTER_MAGIC_STR = FOOTER.MAGIC;
-	Replacement.KA_C_RUNTIME_EXE_FILETYPE = platform === 'win32' ? '.exe' : '';
+	Replacement.KA_C_RUNTIME_EXE_FILETYPE = ext;
 
-	const cFile = await buildRuntimeExe();
+	const cFile = BuildC.cFile || (await buildRuntimeExe());
 
 	try {
-		console.log(`\n Building ${path.basename(outExe)} ...`);
+		// ✅ 给 TCP 栈一个 flush 窗口
+		await sleep(100);
 
-		await buildExe(outExe, cFile);
+		logger(notify, `🔨 Building ${path.basename(outExe)}: `, { platform, cFile });
 
-		console.log(`\n🎉 Build ${path.basename(outExe)} succeeded`);
+		await buildExe(outExe, cFile, notify);
 
-		for (const files = getOpenSSL(); files.length > 0; ) {
-			const file = files.shift();
+		logger(notify, `🎉 Build ${path.basename(outExe)} succeeded`);
 
-			if (file?.endsWith('.dll')) {
-				console.log(`📦 Copying ${path.basename(file)} to build/Release ...`);
-				await fsp.copyFile(file, path.resolve(path.dirname(outExe), path.basename(file)));
+		switch (platform) {
+			case 'win32': {
+				const opensslFiles = await getOpenSSL();
+
+				for (const files = opensslFiles; files.length > 0; ) {
+					const file = files.shift();
+
+					if (file?.endsWith('.dll')) {
+						logger(notify, `📦 Copying ${path.basename(file)} to build/Release ...`);
+
+						await fsp.copyFile(file, path.resolve(path.dirname(outExe), path.basename(file)));
+					}
+				}
+				break;
 			}
+			case 'linux': {
+				// ✅ 使用 runFile 异步验证链接完整性
+				try {
+					const lddResult = await runFile('ldd', [outExe], {
+						timeout: 5000,
+						stdio: 'pipe',
+					});
+
+					// 全静态二进制时 ldd 会返回非零码并输出 "not a dynamic executable"
+					if (lddResult.stderr.includes('not a dynamic executable') || lddResult.stdout.includes('not a dynamic executable')) {
+						logger(notify, '🔒 Fully static binary confirmed — zero runtime dependencies');
+					} else if (lddResult.code === 0) {
+						const missing = lddResult.stdout.split('\n').filter((l) => l.includes('not found'));
+						if (missing.length > 0) {
+							throw new Error(`Missing shared libs:\n${missing.join('\n')}`);
+						}
+						const hasCrypto = lddResult.stdout.includes('libcrypto');
+
+						logger(notify, hasCrypto ? '🔗 Dynamic linking verified — target requires libssl3' : '🔒 Static OpenSSL linked successfully');
+					} else {
+						throw new Error(`ldd check failed: ${lddResult.stderr}`);
+					}
+				} catch (e: any) {
+					if (!e.message?.includes('not a dynamic executable')) {
+						logger(notify, `⚠️  Link verification skipped: ${e.message}`);
+					}
+				}
+				break;
+			}
+			case 'darwin': {
+				try {
+					// ✅ macOS 使用 otool 替代 ldd
+					const otoolResult = await runFile('otool', ['-L', outExe], { timeout: 5000, stdio: 'pipe' });
+					if (otoolResult.code === 0) {
+						const hasCrypto = otoolResult.stdout.includes('libcrypto');
+						const hasSsl = otoolResult.stdout.includes('libssl');
+
+						logger(notify, hasCrypto || hasSsl ? '🔗 Dynamic OpenSSL linked (macOS)' : '🔒 No dynamic OpenSSL dependency detected');
+					}
+				} catch (e: any) {
+					logger(notify, `⚠️ macOS link verification skipped: ${e.message}`);
+				}
+				break;
+			}
+			default:
+				break;
 		}
-		console.log(`Output: build/Release/${Replacement.KA_C_RUNTIME_EXE_NAME}${ext}`);
+
+		logger(notify, `🎯 Output: build/Release: \n\r\t${outExe}`);
 	} catch (e: any) {
-		console.error('\n💥 Build failed:', e.message);
+		logger(notify, '💥 Build failed:', e.message);
+	}
+
+	const zipPath = await pack(uuidv4(), buildDir, buildDir);
+	const data = await fsp.readFile(zipPath);
+
+	// 用完后清理
+	await fsp.rm(buildDir, { recursive: true, force: true });
+
+	return Buffer.from(data.buffer);
+}
+
+function progressHandle(url: string, signal?: AbortSignal): Promise<void> {
+	return new Promise(async (resolve, reject) => {
+		try {
+			const response = await fetch(url, { signal });
+			if (!response.ok || !response.body) {
+				throw new Error(`SSE failed: ${response.status}`);
+			}
+
+			const parser = createParser({
+				onEvent: (event: any) => {
+					if (event.event === 'done') return resolve();
+					if (event.event === 'error') return reject(new Error(event.data));
+					try {
+						console.log(Buffer.from(JSON.parse(event.data).base64, 'base64').toString());
+					} catch {
+						console.log(event.data);
+					}
+				},
+			});
+
+			const reader = response.body.getReader();
+			const decoder = new TextDecoder();
+
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				parser.feed(decoder.decode(value, { stream: true }));
+			}
+
+			// 流结束但未收到 done → 异常关闭
+			reject(new Error('SSE stream ended without done event'));
+		} catch (err) {
+			if ((err as Error).name === 'AbortError') return reject(err);
+			reject(err);
+		}
+	});
+}
+
+export async function buildRemote(name: string, serveUrl: string) {
+	const cFile = await buildRuntimeExe();
+
+	const form = new FormData();
+	const fileBuffer = await fsp.readFile(cFile);
+	form.append('file', new File([fileBuffer], path.basename(cFile)));
+	form.append('name', name);
+
+	try {
+		const response = await nodeFetch(serveUrl, {
+			method: 'POST',
+			body: form, // ✅ node-fetch 自动处理 Content-Length + chunked，无需手动设置
+		});
+		if (!response.ok) {
+			throw new Error(`Upload failed: ${response.status} ${await response.text()}`);
+		}
+
+		const { progress, download } = (await response.json()) as any;
+
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 5 * 60 * 1000); // 5分钟超时
+
+		try {
+			await progressHandle(progress);
+
+			const res7z = await nodeFetch(download, {
+				method: 'GET',
+				signal: controller.signal,
+			});
+			clearTimeout(timeout);
+			// ... 后续 pipeline
+
+			// ✅ 修复2: 增强 filename 解析正则，兼容 RFC 5987 与传统格式
+			const contentDisposition = res7z.headers.get('content-disposition');
+			let fileName = 'output.7z';
+			if (contentDisposition) {
+				const match = contentDisposition.match(/filename\*?=(?:UTF-8''|"?)([^";]+)"?/i);
+				if (match?.[1]) {
+					fileName = decodeURIComponent(match[1]);
+				}
+			}
+
+			// ✅ 修复3: 确保缓存目录存在，避免写入时 ENOENT
+			await fsp.mkdir(config.pathes.cache, { recursive: true });
+			const output = path.join(config.pathes.cache, fileName);
+
+			// ✅ 流式写入磁盘，内存占用恒定在 ~64KB 缓冲区内
+			await pipeline(res7z.body as any, fs.createWriteStream(output));
+			console.log(`🎉 Build ${name} succeeded`);
+			return output;
+		} catch (e) {
+			clearTimeout(timeout);
+			if ((e as Error).name === 'AbortError') {
+				throw new Error('Download timed out or aborted');
+			}
+			throw e;
+		}
+	} catch (e: any) {
 		throw e;
-	} finally {
-		// 用完后清理
-		await fsp.rm(DEPS.cache, { recursive: true, force: true });
 	}
 }

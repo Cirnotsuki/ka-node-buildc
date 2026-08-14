@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { mkdirp } from 'mkdirp';
 import path from 'path';
 import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
@@ -15,7 +16,10 @@ export default class Config {
 				return path.resolve(dirname, name);
 			}
 
-			if (files.includes('package.json')) return '';
+			if (files.includes('package.json')) {
+				mkdirp.sync(path.join(dirname, name));
+				return path.join(dirname, name);
+			}
 
 			dirname = path.resolve(dirname, '..');
 
@@ -28,6 +32,8 @@ export default class Config {
 	static pathes = {
 		templates: this.getDir('templates'),
 		deps: this.getDir('deps'),
+		cache: this.getDir('.cache'),
+		uploads: this.getDir('uploads'),
 	};
 
 	static deps = {

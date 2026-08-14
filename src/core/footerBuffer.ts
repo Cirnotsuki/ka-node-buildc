@@ -1,4 +1,4 @@
-import { generateVariableName } from '../../../wp-php-merge/src/utils/helper';
+import { uuidv4 } from '@ka-libs/crypto';
 
 type FooterPos = number;
 type FooterStructType = 'char' | 'uint8_t' | 'uint16_t' | 'uint32_t' | 'uint64_t';
@@ -11,8 +11,7 @@ export class FooterBuffer {
 
 	private pos: number = 0;
 
-	private structRecord: Map<FooterPos, [FooterStructType, FooterStructName, FooterStructLength]> =
-		new Map();
+	private structRecord: Map<FooterPos, [FooterStructType, FooterStructName, FooterStructLength]> = new Map();
 
 	constructor(size: number) {
 		if (size <= 0 || !Number.isInteger(size)) {
@@ -26,8 +25,7 @@ export class FooterBuffer {
 	}
 
 	get struct() {
-		const arr: Array<[FooterStructType, FooterStructName, FooterStructLength] | undefined> =
-			new Array(this.size);
+		const arr: Array<[FooterStructType, FooterStructName, FooterStructLength] | undefined> = new Array(this.size);
 
 		for (let i = 0; i < this.size; i++) {
 			arr[i] = this.structRecord.get(i);
@@ -46,11 +44,11 @@ export class FooterBuffer {
 			result.push(`uint8_t reserved[${this.size - this.pos}];`);
 		}
 		return result.join('\n');
-    }
-    
-    get buffer() {
-        return new Uint8Array(this._buffer.buffer);
-    }
+	}
+
+	get buffer() {
+		return new Uint8Array(this._buffer.buffer);
+	}
 
 	/** 每种类型的实际字节大小 */
 	static UNPACK_SYMBOL: Record<FooterStructLength, string> = {
@@ -61,8 +59,7 @@ export class FooterBuffer {
 	};
 
 	get unpacker() {
-		const arr: Array<[FooterStructType, FooterStructName, FooterStructLength] | undefined> =
-			new Array(this.size);
+		const arr: Array<[FooterStructType, FooterStructName, FooterStructLength] | undefined> = new Array(this.size);
 
 		for (let i = 0; i < this.size; i++) {
 			arr[i] = this.structRecord.get(i);
@@ -88,10 +85,10 @@ export class FooterBuffer {
 		uint64_t: 8,
 	};
 
-    unpack(buffer?: Buffer) {
-        if (!buffer) {
-            buffer = this._buffer;
-        }
+	unpack(buffer?: Buffer) {
+		if (!buffer) {
+			buffer = this._buffer;
+		}
 		const result: Record<string, any> = {};
 
 		for (const [pos, [type, name, length]] of this.structRecord) {
@@ -114,27 +111,20 @@ export class FooterBuffer {
 				default:
 					break;
 			}
-        }
-        
-        return result;
+		}
+
+		return result;
 	}
 
-	write(
-		data: string | number | bigint,
-		type: FooterStructType,
-		name: FooterStructName,
-		length: number,
-	) {
+	write(data: string | number | bigint, type: FooterStructType, name: FooterStructName, length: number) {
 		// 按类型实际大小计算，不再强制 4 字节对齐
 		const byteLen = type === 'char' ? length : FooterBuffer.TYPE_SIZE[type];
 
 		if (this.pos + byteLen > this.size) {
-			throw new Error(
-				`Footer overflow: writing ${byteLen} bytes at offset ${this.pos} exceeds size ${this.size}`,
-			);
-        }
-        
-        const buffer = this._buffer;
+			throw new Error(`Footer overflow: writing ${byteLen} bytes at offset ${this.pos} exceeds size ${this.size}`);
+		}
+
+		const buffer = this._buffer;
 
 		if (typeof data === 'string') {
 			buffer.write(data, this.pos, byteLen, 'ascii');
@@ -148,7 +138,7 @@ export class FooterBuffer {
 			buffer.writeBigUInt64LE(BigInt(data), this.pos);
 		}
 
-		this.structRecord.set(this.pos, [type, name || generateVariableName(), length]);
+		this.structRecord.set(this.pos, [type, name || 'vn_' + uuidv4(true).slice(-6).toLowerCase(), length]);
 		this.pos += byteLen;
 	}
 

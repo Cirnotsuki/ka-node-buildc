@@ -1,9 +1,9 @@
 {
 	"name": "@ka-libs/buildc",
 	"version": "1.0.0",
-	"main": "index.js",
+	"main": "./dist/cjs/index.cjs",
 	"scripts": {
-		"test": "echo \"Error: no test specified\" && exit 1"
+		"serve": "nvm use 20.16.0 && tsx serve.ts"
 	},
 	"type": "module",
 	"author": "Kuzuki Azusa",
@@ -12,21 +12,68 @@
 	"devDependencies": {
 		"@eslint/js": "^10.0.1",
 		"@ka-libs/crypto": "^1.5.2",
-		"@ka-libs/utils": "^1.1.0",
+		"@ka-libs/utils": "^1.2.0",
+		"@koa/cors": "^5.0.0",
+		"@koa/multer": "^4.0.0",
+		"@koa/router": "^15.7.0",
 		"@types/cli-progress": "^3.11.6",
+		"@types/koa": "^3.0.3",
+		"@types/koa__multer": "^2.0.8",
+		"@types/koa-bodyparser": "^4.3.13",
 		"@types/node": "^26.1.0",
 		"@types/ws": "^8.18.1",
+		"7zip-bin": "^5.2.0",
 		"chalk": "^5.6.2",
 		"cli-progress": "^3.12.0",
 		"eslint": "^10.6.0",
+		"eventsource-parser": "^4.0.0",
 		"execa": "^10.0.1",
+		"form-data": "^4.0.6",
 		"globals": "^17.7.0",
+		"koa": "^3.2.1",
+		"koa-bodyparser": "^4.4.1",
 		"mkdirp": "^3.0.1",
 		"php-parser": "^3.6.0",
 		"terser": "^5.46.1",
 		"tsx": "^4.22.5",
 		"uglify-php": "^1.0.7",
-		"ws": "^8.21.0",
-		"7zip-bin": "^5.2.0"
+		"ws": "^8.21.0"
+	},
+	"files": [
+		"dist",
+		"templates",
+		"README.md",
+		"LICENSE"
+	],
+	"exports": {
+		".": {
+			"types": "./dist/types/index.d.ts",
+			"import": "./dist/esm/index.js",
+			"require": "./dist/cjs/index.cjs"
+		},
+		"./build-c": {
+			"import": "./dist/esm/core/buildc.js",
+			"types": "./dist/types/BuildC.d.ts"
+		},
+		"./to-buf-c": {
+			"import": "./dist/esm/lib/utils.js",
+			"types": "./dist/types/utils.d.ts"
+		},
+		"./to-buf": {
+			"import": "./dist/esm/lib/utils.js",
+			"types": "./dist/types/utils.d.ts"
+		},
+		"./create-footer": {
+			"import": "./dist/esm/lib/utils.js",
+			"types": "./dist/types/utils.d.ts"
+		}
+	},
+	"types": "./dist/types/index.d.ts",
+	"publishConfig": {
+		"access": "public"
+	},
+	"module": "./dist/esm/index.js",
+	"dependencies": {
+		"node-fetch": "^3.3.2"
 	}
 }

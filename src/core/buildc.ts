@@ -1,12 +1,10 @@
-import path from 'path';
-import fs from 'fs';
-import os from 'os';
 import config from '../../config';
-import { build } from '../lib/build';
+import { build, buildRemote } from '../lib/build';
 import { createFooter, toBuf, toBufC } from '../lib/utils';
 
 export class BuildC {
-	static platform: 'win32' | 'linux' | 'darwin' | 'macos' = 'win32';
+	static platform: 'win32' | 'linux' | 'darwin' = 'win32';
+	static cFile = '';
 
 	static FOOTER = {
 		VERSION: config.build?.version || 1,
@@ -81,6 +79,7 @@ export class BuildC {
 	};
 
 	static build = build;
+	static buildRemote = buildRemote;
 	static toBufC = toBufC;
 	static toBuf = toBuf;
 	static createFooter = createFooter;
