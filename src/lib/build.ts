@@ -44,14 +44,17 @@ async function getPhpIncludes() {
 /**
  * OpenSSL路径
  */
+/**
+ * OpenSSL路径
+ */
 async function getOpenSSL() {
 	const { platform, DEPS } = BuildC;
 
 	switch (platform) {
-		case 'win32':
+		case 'win32': {
 			const opensslDir = path.resolve(DEPS.location, DEPS.openssl.location, platform);
 
-			const opensslLib = path.resolve(opensslDir, DEPS.openssl.lib) ?? process.env.OPENSSL_LIB_PATH;
+			const opensslLib = path.resolve(opensslDir, DEPS.openssl.lib);
 
 			const file = path.join(opensslLib, 'libcrypto.lib');
 
@@ -60,12 +63,53 @@ async function getOpenSSL() {
 			}
 
 			const SSL_DLL = path.resolve(opensslDir, DEPS.openssl.sslDll);
+
 			const CRYPTO_DLL = path.resolve(opensslDir, DEPS.openssl.cryptoDll);
 
 			return [`-I${path.resolve(opensslDir, DEPS.openssl.include)}`, SSL_DLL, CRYPTO_DLL];
+		}
 
-		case 'linux':
-		case 'darwin':
+		case 'linux': {
+			const includeResult = await runFile('pkg-config', ['--variable=includedir', 'openssl'], {
+				timeout: 5000,
+				stdio: 'pipe',
+			});
+
+			if (includeResult.code !== 0 || !includeResult.stdout.trim()) {
+				throw new Error(`Failed to locate OpenSSL include directory:\n${includeResult.stderr}`);
+			}
+
+			const libResult = await runFile('pkg-config', ['--variable=libdir', 'openssl'], {
+				timeout: 5000,
+				stdio: 'pipe',
+			});
+
+			if (libResult.code !== 0 || !libResult.stdout.trim()) {
+				throw new Error(`Failed to locate OpenSSL library directory:\n${libResult.stderr}`);
+			}
+
+			const includeDir = includeResult.stdout.trim();
+			const libDir = libResult.stdout.trim();
+
+			DEPS.openssl.include = includeDir;
+			DEPS.openssl.lib = libDir;
+
+			// ✅ 同时检查 libcrypto 和 libssl
+			const hasCrypto = fs.existsSync(path.join(libDir, 'libcrypto.so')) || fs.existsSync(path.join(libDir, 'libcrypto.a'));
+			const hasSsl = fs.existsSync(path.join(libDir, 'libssl.so')) || fs.existsSync(path.join(libDir, 'libssl.a'));
+
+			if (!hasCrypto) {
+				throw new Error(`Linux libcrypto not found in: ${libDir}`);
+			}
+			if (!hasSsl) {
+				throw new Error(`Linux libssl not found in: ${libDir}`);
+			}
+
+			// ✅ 返回两个库，-lssl 必须在 -lcrypto 前面（链接器单向扫描）
+			return [`-I${includeDir}`, `-L${libDir}`, '-lssl', '-lcrypto'];
+		}
+
+		case 'darwin': {
 			try {
 				const result = await runFile('pkg-config', ['--cflags', '--libs', 'openssl'], {
 					timeout: 5000,
@@ -79,12 +123,50 @@ async function getOpenSSL() {
 				// pkg-config 不存在或超时，静默降级
 			}
 
-			// Fallback: Ubuntu/Debian 默认路径
-			console.warn('⚠️  pkg-config failed, using fallback OpenSSL paths');
-			return ['-I/usr/include', '-L/usr/lib/x86_64-linux-gnu', '-lssl', '-lcrypto'];
+			console.warn('⚠️ pkg-config failed, using fallback OpenSSL paths');
+
+			return ['-I/usr/include', '-L/usr/lib', '-lcrypto'];
+		}
+
 		default:
 			throw new Error('Unsupported platform');
 	}
+}
+
+/**
+ * 获取 OpenSSL 静态链接所需的额外依赖库
+ * OpenSSL 3.x 的 libcrypto.a 引用了 zstd/zlib/jitterentropy 符号，
+ * 静态链接时必须显式提供这些库。
+ */
+async function getOpenSSLDeps(platform: string): Promise<string[]> {
+	if (platform !== 'linux') return [];
+
+	const deps: string[] = [];
+
+	// 按依赖顺序排列：被依赖者在前
+	const candidates = ['libzstd', 'libz', 'libjitterentropy'];
+
+	for (const lib of candidates) {
+		try {
+			const result = await runFile('pkg-config', ['--libs', lib.replace(/^lib/, '')], {
+				timeout: 3000,
+				stdio: 'pipe',
+			});
+			if (result.code === 0 && result.stdout.trim()) {
+				// pkg-config 可能返回 "-L/path -lfoo"，直接拆分使用
+				deps.push(...result.stdout.trim().split(/\s+/).filter(Boolean));
+				continue;
+			}
+		} catch {
+			// pkg-config 不可用或该库没有 .pc 文件，静默降级
+		}
+
+		// Fallback: 直接用 -l 标志
+		const libName = lib.replace(/^lib/, '');
+		deps.push(`-l${libName}`);
+	}
+
+	return deps;
 }
 
 /**
@@ -114,10 +196,11 @@ async function createBindingGyp(dirPathC: string) {
 						'OS!="win"',
 						{
 							cflags: ['-O2', '-fPIC', '-std=c11'],
-							ldflags: ['-static'], // Linux/macOS 也建议静态链接
-							libraries: ['-lcrypto'],
+							// ✅ -lssl 在 -lcrypto 前面
+							libraries: ['-lssl', '-lcrypto', '-lpthread', '-ldl'],
 						},
 					],
+					// ... win32 保持不变
 					[
 						'OS=="win"',
 						{
@@ -215,41 +298,50 @@ async function buildExe(outExe: string, cFile: string, nodify: (msg: string) => 
 	const { platform } = BuildC;
 
 	const options = ['cc', '-o', outExe, cFile, '-O2', '-std=c11', '-Wl,--strip-all'];
+
+	// if (platform === 'linux') {
+	// 	options.push('-static');
+	// }
+
 	const opensslFiles = await getOpenSSL();
 	options.push(...opensslFiles);
 
 	switch (platform) {
 		case 'win32':
-			// Windows GNU 工具链还需要这些系统库
 			options.push('-lws2_32', '-lgdi32', '-ladvapi32', '-lcrypt32', '-luser32');
 			break;
-		case 'linux':
-			// ✅ 仅 Linux 支持全静态
-			options.push('-lpthread', '-ldl', '-static');
+
+		case 'linux': {
+			// // OpenSSL 3.x 静态链接需要额外的压缩/熵源库
+			// const sslDeps = await getOpenSSLDeps(platform);
+			// options.push(...sslDeps, '-lpthread', '-ldl');
+			// break;
+			// ✅ 动态链接只需基础系统库，无需 zstd/z/jitterentropy
+			options.push('-lpthread', '-ldl');
 			break;
+		}
 		case 'darwin':
-			// ✅ macOS 只能动态链接，补充必要系统框架
 			options.push('-lpthread', '-ldl', '-framework', 'Security', '-framework', 'CoreFoundation');
-			break;
-		default:
 			break;
 	}
 
 	logger(nodify, `⚙️ Build Options: `, options);
 
 	const result = await runFile(await getEXE('zigCC'), options, {
-		stdio: 'inherit', // 捕获输出以便在失败时抛出详细错误
-		timeout: 180_000, // 2 分钟超时
+		stdio: 'inherit',
+		timeout: 180_000,
 	});
 
 	if (result.code !== 0) {
 		throw new Error(`zig cc exited with code ${result.code}\n${result.stderr}`);
 	}
 
-	// 验证产物
 	try {
 		const stat = fs.statSync(outExe);
-		if (stat.size === 0) throw new Error('Compiled binary is empty');
+
+		if (stat.size === 0) {
+			throw new Error('Compiled binary is empty');
+		}
 	} catch (e) {
 		throw new Error(`Output verification failed: ${(e as Error).message}`);
 	}

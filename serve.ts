@@ -164,10 +164,9 @@ router.get('/build/progress/:taskId', async (ctx) => {
 		ctx.status = 404;
 		ctx.body = { error: 'Task not found' };
 		return;
-    }
-    
-	ctx.req.socket?.setNoDelay(true);
+	}
 
+	ctx.req.socket?.setNoDelay(true);
 
 	// ✅ 设置 SSE 必需响应头
 	ctx.set('Content-Type', 'text/event-stream');
@@ -223,6 +222,7 @@ app.use(router.routes()).use(router.allowedMethods());
 
 const PORT = 2000;
 app.listen(PORT, () => {
+	console.log(config);
 	console.log(`✅ 服务已启动：http://${ip}:${PORT}\n`);
 	console.log(`✅ build:${os.platform()} => http://${ip}:${PORT}/build`);
 });

@@ -1,9 +1,14 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h> // malloc
 #include <string.h>
+#include <unistd.h>	  // readlink, usleep, lstat(部分声明)
+#include <sys/stat.h> // lstat, struct stat, S_ISDIR
+#include <signal.h>	  // kill
 #ifdef _WIN32
 #	include <windows.h>
 #	include <winternl.h>
@@ -13,16 +18,13 @@
 // open() / O_EXCL / ssize_t / DIR* 等类型在 Windows 下不存在
 #else
 
-#	include <signal.h>
 #	include <time.h>
 #	include <dirent.h> // DIR, opendir, readdir, closedir
 #	include <dlfcn.h>
 #	include <errno.h> // errno, EINTR
 #	include <fcntl.h> // O_WRONLY, O_CREAT, O_EXCL
 #	include <limits.h>
-#	include <sys/stat.h>
 #	include <sys/types.h> // ssize_t, mode_t
-#	include <unistd.h>
 #	include <pthread.h>
 #	include <poll.h>
 #	define IS_TTY() isatty(STDOUT_FILENO)
@@ -700,23 +702,44 @@ static char *write_temp_php(const char *temp_dir, const char *prefix, const unsi
 
 	int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
 	if (fd < 0) {
+		fprintf(
+			stderr,
+			"[KA] open failed: path=[%s], errno=%d, error=%s\n",
+			path,
+			errno,
+			strerror(errno));
 		return NULL;
 	}
 
 	size_t total_written = 0;
 
-	while (total_written < size) {
-		ssize_t n = write(fd, php_header + total_written, php_header_len - total_written);
+	while (total_written < (size_t)php_header_len)
+	{
+		ssize_t n = write(fd, php_header + total_written, (size_t)php_header_len - total_written);
 
 		if (n <= 0) {
 			if (n < 0 && errno == EINTR)
 				continue;
 
+			fprintf(
+				stderr,
+				"[KA] write header failed: path=[%s], errno=%d, error=%s\n",
+				path,
+				errno,
+				strerror(errno));
+
 			close(fd);
 			unlink(path);
 			return NULL;
 		}
-		total_written += n;
+		if (n == 0)
+		{
+			close(fd);
+			unlink(path);
+			return NULL;
+		}
+
+		total_written += (size_t)n;
 	}
 
 	total_written = 0;
@@ -726,14 +749,41 @@ static char *write_temp_php(const char *temp_dir, const char *prefix, const unsi
 		if (n <= 0) {
 			if (n < 0 && errno == EINTR)
 				continue;
+
+			fprintf(
+				stderr,
+				"[KA] write data failed: path=[%s], errno=%d, error=%s\n",
+				path,
+				errno,
+				strerror(errno));
+
 			close(fd);
 			unlink(path);
 			return NULL;
 		}
-		total_written += n;
+		if (n == 0)
+		{
+			close(fd);
+			unlink(path);
+			return NULL;
+		}
+
+		total_written += (size_t)n;
 	}
 
-	fsync(fd);
+	if (fsync(fd) != 0)
+	{
+		fprintf(
+			stderr,
+			"[KA] fsync failed: path=[%s], errno=%d, error=%s\n",
+			path,
+			errno,
+			strerror(errno));
+
+		close(fd);
+		unlink(path);
+		return NULL;
+	}
 	close(fd);
 #endif
 
@@ -1084,21 +1134,24 @@ static void run_smart_clean(const char *path) {
 		/*
 		 * 每 100ms 检查一次。
 		 */
-		usleep(100000);
+		// 替代 usleep(100000) → 睡眠 100ms
+		struct timespec ts = {.tv_sec = 0, .tv_nsec = 100000000L};
+		nanosleep(&ts, NULL);
 	}
 
 	/*
 	 * 给 PHP 一点时间释放文件。
 	 */
-	usleep(100000);
-
+	// 替代 usleep(100000) → 睡眠 100ms
+	struct timespec ts = {.tv_sec = 0, .tv_nsec = 100000000L};
+	nanosleep(&ts, NULL);
 	/*
 	 * 删除临时目录。
 	 */
 	if (TEMPDIR[0] != '\0') {
-		clean_temp_dir(temp_path);
+		clean_temp_dir(path);
 	} else {
-		clean_temp_file(temp_path);
+		clean_temp_file(path);
 	}
 
 	/*

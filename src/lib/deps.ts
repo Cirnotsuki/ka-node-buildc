@@ -1,4 +1,3 @@
-
 import fs from 'fs';
 import fsp from 'fs/promises';
 import { pipeline } from 'stream/promises';
@@ -32,8 +31,6 @@ function getZigUrl(): string {
 			throw new Error(`Unsupported platform: ${platform}`);
 	}
 }
-
-
 
 function getDepHash(name: 'zigCC') {
 	const { platform, DEPS } = BuildC;
@@ -115,16 +112,28 @@ export async function downloadDep(name: 'zigCC', url: string) {
 	const { platform, DEPS } = BuildC;
 
 	const cacheDir = DEPS.cache;
+	await mkdirp(cacheDir);
 
 	const hash = getDepHash(name);
 
 	let tmpFile = '';
-	for (const file of fs.readdirSync(cacheDir)) {
-		if (file.endsWith('.tmp') && file.startsWith(`${name}-`)) {
-			tmpFile = path.join(cacheDir, file);
-			break;
+
+	const fileName = path.basename(url);
+	for (const file of fs.readdirSync(DEPS.location)) {
+		if (file === fileName) {
+			tmpFile = path.join(DEPS.location, file);
 		}
 	}
+
+	if (!tmpFile) {
+		for (const file of fs.readdirSync(cacheDir)) {
+			if (file.endsWith('.tmp') && file.startsWith(`${name}-`)) {
+				tmpFile = path.join(cacheDir, file);
+				break;
+			}
+		}
+	}
+
 	if (!tmpFile) {
 		tmpFile = await handleDownload(name, url);
 	}

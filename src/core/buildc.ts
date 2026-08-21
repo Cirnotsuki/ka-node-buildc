@@ -13,7 +13,7 @@ export class BuildC {
 	};
 
 	static DEPS = {
-		cache: '',
+		cache: config.pathes.cache || '',
 		location: config.deps?.location || '',
 
 		openssl: {

@@ -1,4 +1,5 @@
 import fs from 'fs';
+import os from 'os';
 import { mkdirp } from 'mkdirp';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -55,7 +56,7 @@ export default class Config {
 
 			hash: {
 				win32: '68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e',
-				linux: '',
+				linux: '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00',
 			},
 		},
 	};
@@ -64,6 +65,6 @@ export default class Config {
 		version: 1,
 		magic: 'CHNK',
 		footerSize: 64,
-		platform: 'win32',
+		platform: os.platform(),
 	};
 }
